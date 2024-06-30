@@ -5,10 +5,11 @@ import com.seaofnodes.simple.type.*;
 import java.util.BitSet;
 
 /** Keeps all preceding memory effects and the return value alive: {ctrl, $mem, value}. */
-public class ReturnNode extends Node {
+public class ReturnNode extends CFGNode {
 
     public ReturnNode(Node ctrl, Node data, ScopeNode scope) {
-        super(ctrl, scope.lookup("$mem"), data);
+        // A synthetic never-taken loop exit has no source scope.
+        super(ctrl, scope == null ? null : scope.lookup("$mem"), data);
     }
 
     public Node ctrl() { return in(0); }
@@ -25,8 +26,6 @@ public class ReturnNode extends Node {
         return sb.append(";");
     }
 
-    @Override public boolean isCFG() { return true; }
-
     @Override
     public Type compute() {
         // Return exposes the complete memory state.
@@ -39,4 +38,6 @@ public class ReturnNode extends Node {
             return ctrl();
         return null;
     }
+
+    @Override public Node getBlockStart() { return ctrl().getBlockStart(); }
 }
