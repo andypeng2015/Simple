@@ -14,8 +14,7 @@ public class StartNode extends CFGNode implements MultiNode {
         _type = _args = TypeTuple.make(args);
     }
 
-    @Override
-    public String label() { return "Start"; }
+    @Override public String label() { return "Start"; }
 
     @Override
     StringBuilder _print1(StringBuilder sb, BitSet visited) {
@@ -24,6 +23,7 @@ public class StartNode extends CFGNode implements MultiNode {
 
     @Override public boolean isMultiHead() { return true; }
     @Override public boolean blockHead() { return true; }
+    @Override public CFGNode cfg0() { return this; }
 
     @Override
     public TypeTuple compute() { return _args; }
