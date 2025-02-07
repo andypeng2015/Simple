@@ -1,5 +1,7 @@
 package com.seaofnodes.simple.node;
 
+import com.seaofnodes.simple.CodeGen;
+import com.seaofnodes.simple.Parser;
 import com.seaofnodes.simple.type.*;
 import java.util.BitSet;
 import java.util.HashSet;
@@ -10,7 +12,8 @@ public class StartNode extends LoopNode implements MultiNode {
 
     final Type _arg;
 
-    public StartNode(Type arg) { super(null,null); _arg = arg; _type = compute(); }
+    public StartNode(Type arg) { super((Parser.Lexer)null,null); _arg = arg; _type = compute(); }
+    public StartNode(StartNode start) { super(start); _arg = start._arg; }
 
     @Override public String label() { return "Start"; }
 
@@ -29,7 +32,7 @@ public class StartNode extends LoopNode implements MultiNode {
         // Find "main", its the start.
         CFGNode C = null;
         for( Node use : _outputs )
-            if( use instanceof FunNode fun && fun.sig().isa(TypeFunPtr.MAIN) )
+            if( use instanceof FunNode fun && fun.sig().isa(CodeGen.CODE._main) )
                 { assert C==null; C = fun; }
         return C;
     }
