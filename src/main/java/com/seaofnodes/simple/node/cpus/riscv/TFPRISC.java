@@ -4,6 +4,7 @@ import com.seaofnodes.simple.*;
 import com.seaofnodes.simple.codegen.*;
 import com.seaofnodes.simple.node.ConstantNode;
 import com.seaofnodes.simple.node.MachNode;
+import com.seaofnodes.simple.node.Node;
 import com.seaofnodes.simple.type.TypeFunPtr;
 
 public class TFPRISC extends ConstantNode implements MachNode, RIPRelSize {
@@ -19,11 +20,9 @@ public class TFPRISC extends ConstantNode implements MachNode, RIPRelSize {
         short dst = enc.reg(this);
         TypeFunPtr tfp = (TypeFunPtr)_con;
         // auipc  t0,0
-        int auipc = riscv.u_type(riscv.OP_AUIPC, dst, 0);
+        enc.add4(riscv.u_type(riscv.OP_AUIPC, dst, 0));
         // addi   t1,t0 + #0
-        int addi = riscv.i_type(riscv.OP_IMM, dst, 0, dst, 0);
-        enc.add4(auipc);
-        enc.add4(addi);
+        enc.add4(riscv.i_type(riscv.OP_IMM, dst, 0, dst, 0));
     }
 
     @Override public byte encSize(int delta) { return 8; }
@@ -44,5 +43,5 @@ public class TFPRISC extends ConstantNode implements MachNode, RIPRelSize {
     @Override public void asm(CodeGen code, SB sb) {
         _con.print(sb.p(code.reg(this)).p(" #"));
     }
-
+    @Override public boolean eq(Node n) { return this==n; }
 }
