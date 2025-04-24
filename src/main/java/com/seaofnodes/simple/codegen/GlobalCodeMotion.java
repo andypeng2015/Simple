@@ -172,7 +172,7 @@ public abstract class GlobalCodeMotion {
                         continue outer; // Nope, await all uses done
 
                 // Loads need their memory inputs' uses also done
-                if( n instanceof MemOpNode ld && !ld.isMem() )
+                if( n instanceof MemOpNode ld && ld._isLoad )
                     for( Node memuse : ld.antiDeps() )
                         if( late[memuse._nid]==null )
                             continue outer;
@@ -205,8 +205,9 @@ public abstract class GlobalCodeMotion {
               lca = use_block(n,use, late).domLCA(lca,null);
 
         // Loads may need anti-dependencies, raising their LCA
-        if( n instanceof MemOpNode load && !load.isMem() )
+        if( n instanceof MemOpNode load && load._isLoad )
             lca = find_anti_dep(lca,load,early,late,anti);
+
 
         // Walk up from the LCA to the early, looking for best place.  This is
         // the lowest execution frequency, approximated by least loop depth and
@@ -250,7 +251,7 @@ public abstract class GlobalCodeMotion {
         if( visit.get(def._nid) ) return;
         visit.set(def._nid);
         for( Node out : def._outputs )
-            if( out instanceof MemOpNode ld && !ld.isMem() && late[ld._nid]==null ) work.push(ld);
+            if( out instanceof MemOpNode ld && ld._isLoad && late[ld._nid]==null ) work.push(ld);
         if( def instanceof MemMergeNode )
             for( int i=1; i<def.nIns(); i++ )
                 if( def.in(i)!=null ) wakeLoads(def.in(i),late,work,visit);
@@ -266,22 +267,22 @@ public abstract class GlobalCodeMotion {
             switch( mem ) {
             case MemOpNode st:
                 assert late[st._nid]!=null;
-                lca = anti_dep(load,late[st._nid],st.cfg0(),lca,st,anti);
+                lca = anti_dep(load,late[st._nid],lca,st,anti);
                 break;
             case CallNode st:
                 assert late[st._nid]!=null;
-                lca = anti_dep(load,late[st._nid],st.cfg0(),lca,st,anti);
+                lca = anti_dep(load,late[st._nid],lca,st,anti);
                 break;
             case PhiNode phi:
                 // Repeat anti-dep for matching Phi inputs.
                 // No anti-dep edges but may raise the LCA.
                 for( int i=1; i<phi.nIns(); i++ )
                     if( phi.in(i)==load.mem() )
-                        lca = anti_dep(load,phi.region().cfg(i),load.mem().cfg0(),lca,null,anti);
+                        lca = anti_dep(load,phi.region().cfg(i),lca,null,anti);
                 break;
             case NewNode st:
                 assert late[st._nid]!=null;
-                lca = anti_dep(load,late[st._nid],st.cfg0(),lca,st,anti);
+                lca = anti_dep(load,late[st._nid],lca,st,anti);
                 break;
             default: throw Utils.TODO();
             }
@@ -290,15 +291,12 @@ public abstract class GlobalCodeMotion {
     }
 
     //
-    private static CFGNode anti_dep( MemOpNode load, CFGNode stblk, CFGNode defblk, CFGNode lca, Node st, int[] anti ) {
-        for( ; stblk != defblk.idom(); stblk = stblk.idom() ) {
-            // Store and Load overlap, need anti-dependence
-            if( anti[stblk._nid]==load._nid ) {
-                lca = stblk.domLCA(lca,null); // Raise Loads LCA
-                if( lca == stblk && st != null && !(st instanceof CallNode) && st._inputs.find(load) == -1 ) // And if something moved,
-                    st.addDef(load);   // Add anti-dep as well; Calls already end their block.
-                return lca;            // Cap this stores' anti-dep to here
-            }
+    private static CFGNode anti_dep( MemOpNode load, CFGNode stblk, CFGNode lca, Node st, int[] anti ) {
+        // Stores are already placed.  Constrain the load at that block only.
+        if( anti[stblk._nid]==load._nid ) {
+            lca = stblk.domLCA(lca,null);
+            if( lca==stblk && st!=null && !(st instanceof CallNode) && st._inputs.find(load) == -1 )
+                st.addDef(load); // Same-block load must precede the store.
         }
         return lca;
     }
