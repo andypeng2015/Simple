@@ -41,6 +41,7 @@ public class MemMergeNode extends Node {
         if( mem instanceof ProjNode proj && proj.in(0) instanceof NewNode nnn ) {
             assert proj._idx==1 && nnn.field(alias)!=null;
             dep.addDep(nnn);
+            if( dep.addDep(nnn.in(0))._type.isHigh() ) return Type.TOP;
             return contents(nnn.mem(),alias,dep).meet(nnn.field(alias)._t.makeZero());
         }
         // Function parameters and call results may contain arbitrary heap values.
@@ -52,7 +53,6 @@ public class MemMergeNode extends Node {
 
     @Override public String label() { return "MemMerge"; }
     @Override public boolean isMem() { return true; }
-    @Override public Type compute() { return TypeMem.BOT; }
     @Override public StringBuilder _print1(StringBuilder sb, BitSet visited) {
         sb.append("MEM[");
         for( int i=1; i<nIns(); i++ )
@@ -61,6 +61,14 @@ public class MemMergeNode extends Node {
                 in(i)._print0(sb,visited).append(" ");
             }
         return sb.append("]");
+    }
+
+
+    @Override public Type compute() {
+        for( Node n : _inputs )
+            if( n != null && !n._type.isHigh() )
+                return TypeMem.BOT;
+        return TypeMem.TOP;
     }
 
     @Override public Node idealize() {

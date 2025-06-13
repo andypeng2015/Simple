@@ -3,6 +3,7 @@ package com.seaofnodes.simple.node;
 import com.seaofnodes.simple.codegen.*;
 import com.seaofnodes.simple.type.*;
 import com.seaofnodes.simple.util.SB;
+import com.seaofnodes.simple.util.Utils;
 
 import java.util.BitSet;
 
@@ -46,7 +47,9 @@ public class NewNode extends Node implements MultiNode {
 
     @Override
     public TypeTuple compute() {
-        return TypeTuple.make(_ptr,TypeMem.BOT);
+        return in(0)._type.isHigh()
+            ? TypeTuple.make(_ptr.makeHigh(),TypeMem.TOP)
+            : TypeTuple.make(_ptr,TypeMem.BOT);
     }
 
     @Override
