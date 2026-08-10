@@ -27,7 +27,7 @@ public abstract class GlobalCodeMotion {
         breakUpGlobalConstants(code._start);
 
         code._visit.clear();
-        schedLate (code);
+        schedLate(code);
     }
 
     // Post-Order of CFG
@@ -44,45 +44,132 @@ public abstract class GlobalCodeMotion {
     }
 
     // Break up shared global constants by functions
-    private static void breakUpGlobalConstants( Node start ) {
-        // For all global constants
+    private static void breakUpGlobalConstants( StartNode start ) {
+
+        // For all explicitly Start-pinned global values.  Instruction
+        // selection keeps each zero-code/global chain member hooked to Start,
+        // so no later pass has to infer hidden global chains from data inputs.
         for( int i=0; i< start.nOuts(); i++ ) {
             Node con = start.out(i);
-            if( con instanceof MachNode mach && mach.isClone() ) {
-                breakUpGlobalConstants(con);
-                // While constant has users in different functions
-                while( true ) {
-                    // Find a function user, and another function
-                    FunNode fun = null;
-                    boolean done=true;
-                    for( Node use : con.outs() ) {
-                        FunNode fun2 = use instanceof ReturnNode ret ? ret.fun() : use.cfg0().fun();
-                        if( fun==null || fun==fun2 ) fun=fun2;
-                        else { done=false; break; }
-                    }
-                    // Single function user, so this constant is not shared
-                    if( done ) {
-                        if( con.in(0)==start ) i--;
-                        con.setDef(0,fun);
-                        break;
-                    }
-                    // Move function users to a private constant
-                    Node con2 = mach.copy();  // Private constant clone
-                    con2._inputs.set(0,null); // Preserve edge invariants from clone
-                    con2.setDef(0,fun);
-                    // Move function users to this private constant
-                    for( int j=0; j<con._outputs._len; j++ ) {
-                        Node use = con.out(j);
-                        FunNode fun2 = use.cfg0().fun();
-                        if( fun2==fun ) {
-                            use.setDef(use._inputs.find(con),con2);
-                            j--;
-                        }
-                    }
+            if( isStartPinnedGlobalValue(con) ) {
+                breakUpGlobalConstantSingle(con);
+                if( con.nIns()==0 || con.in(0) != start )
+                    i--;    // Removed a global constant, re-run same index
+            }
+        }
+    }
+
+
+    private static void breakUpGlobalConstantSingle( Node con ) {
+        // Split dependent global values first; cloning a later chain member
+        // will recursively clone its Start-pinned inputs on demand.
+        for( Node use : con.outs() )
+            if( use != null && useFun(use)==null ) {
+                if( !isStartPinnedGlobalValue(use) )
+                    return;
+                breakUpGlobalConstantSingle(use);
+            }
+        // While constant has users in different functions
+        while( true ) {
+            // Find a function user, and another function
+            FunNode fun = null;
+            boolean done=true;
+            for( Node use : con.outs() ) {
+                if( use == null ) continue;
+                FunNode fun2 = useFun(use);
+                if( fun2==null || !CodeGen.CODE.owns(fun2) ) continue;
+                if( fun==null || fun==fun2 ) fun=fun2;
+                else { done=false; break; }
+            }
+            // No direct function users: keep this global value at Start.
+            if( fun==null )
+                return;
+            // Single function user, so this constant is not shared
+            if( done ) {
+                con.setDef(0,fun);
+                return;
+            }
+            // Move function users to a private constant
+            Node con2 = cloneGlobalForFun(con,fun,new IdentityHashMap<>());
+            // Move function users to this private constant
+            for( int j=0; j<con._outputs._len; j++ ) {
+                Node use = con.out(j);
+                if( use == null ) continue;
+                FunNode fun2 = useFun(use);
+                if( fun2==null || !CodeGen.CODE.owns(fun2) ) continue;
+                if( fun2==fun ) {
+                    use.setDef(use._inputs.find(con),con2);
+                    j--;
                 }
             }
         }
     }
+
+    private static Node cloneGlobalForFun(Node con, FunNode fun, IdentityHashMap<Node,Node> memo) {
+        Node memoized = memo.get(con);
+        if( memoized != null ) return memoized;
+        Node con2 = con.copy();   // Private constant clone
+        // Node copies made through Node(Node) carry unregistered inputs, while
+        // some machine copies construct fresh registered edges.  The default
+        // Node.copy path gives an input-less clone.  Normalize all of them to
+        // the original data inputs, pinned to the owning function.
+        memo.put(con,con2);
+        if( con2.nIns()==0 ) {
+            con2.addDef(fun);
+            for( int i=1; i<con.nIns(); i++ )
+                con2.addDef(cloneInputForFun(con.in(i),fun,memo));
+        } else {
+            Node oldCtrl = con2.in(0);
+            if( oldCtrl != null && oldCtrl._outputs.find(con2) != -1 )
+                con2.setDef(0,null);
+            else
+                con2._inputs.set(0,null);
+            con2.setDef(0,fun);
+            for( int i=1; i<con2.nIns(); i++ )
+                con2.setDef(i,cloneInputForFun(con.in(i),fun,memo));
+        }
+        return con2;
+    }
+
+    private static Node cloneInputForFun(Node def, FunNode fun, IdentityHashMap<Node,Node> memo) {
+        return isStartPinnedGlobalValue(def)
+            ? cloneGlobalForFun(def,fun,memo)
+            : def;
+    }
+
+    private static boolean isStartPinnedGlobalValue(Node n) {
+        return n != null && n._type != null && !(n instanceof CFGNode) &&
+            n.nIns() > 0 && n.in(0) instanceof StartNode &&
+            (n.isConst() || n instanceof MachNode mach && mach.outregmap()!=null);
+    }
+
+    private static FunNode useFun(Node use) {
+        return useFun(use,new BitSet());
+    }
+
+    private static FunNode useFun(Node use, BitSet visit) {
+        if( visit.get(use._nid) ) return null;
+        visit.set(use._nid);
+        if( use instanceof ReturnNode ret )
+            return ret.fun();
+        if( use instanceof ParmNode parm )
+            return parm.fun();
+        CFGNode cfg = use.cfg0();
+        FunNode fun = cfg==null ? null : cfg.fun();
+        // Use itself is not in a function... which makes it a 2-part
+        // constant such as happens on some chips where large constants have
+        // to be built up in parts.  PtrToInt followed by the array-body Add is
+        // another zero-code/global-value chain, so walk through any number of
+        // single-use pieces until reaching the function-owned use.
+        if( fun==null )
+            for( Node out : use.outs() ) {
+                FunNode f = useFun(out,(BitSet)visit.clone());
+                if( f != null && fun != null && f != fun ) return null;
+                if( f != null ) fun = f;
+            }
+        return fun;
+    }
+
 
     // ------------------------------------------------------------------------
     // Visit all nodes in CFG Reverse Post-Order, essentially defs before uses
@@ -252,6 +339,8 @@ public abstract class GlobalCodeMotion {
     // Block of use.  Normally from late[] schedule, except for Phis, which go
     // to the matching Region input.
     private static CFGNode use_block(Node n, Node use, CFGNode[] late) {
+        if( use instanceof ParmNode parm && n.cfg0().fun()==parm.fun() )
+            return late[use._nid];
         if( !(use instanceof PhiNode phi) )
             return late[use._nid];
         CFGNode found=null;
@@ -286,6 +375,12 @@ public abstract class GlobalCodeMotion {
                     lca = anti_dep( load, late[mem._nid], mem.cfg0(), lca, st );
                 }
                 break; // Loads do not cause anti-deps on other loads
+            case EscapeNode esc:
+                if( load._alias == esc.fld()._alias ) {
+                    assert late[mem._nid] != null;
+                    lca = anti_dep( load, late[mem._nid], mem.cfg0(), lca, mem );
+                }
+                break;
             case CallNode call:
                 assert late[call._nid]!=null;
                 lca = anti_dep(load,late[call._nid],call.cfg0(),lca,call);
