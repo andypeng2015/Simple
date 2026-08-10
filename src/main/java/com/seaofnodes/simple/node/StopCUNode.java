@@ -2,6 +2,7 @@ package com.seaofnodes.simple.node;
 
 import com.seaofnodes.simple.codegen.CodeGen;
 import com.seaofnodes.simple.type.*;
+import com.seaofnodes.simple.util.BAOS;
 
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -10,7 +11,13 @@ import java.util.IdentityHashMap;
 public class StopCUNode extends StopNode {
     public StopCUNode() { super(); }
     public StopCUNode(StopNode stop) { super(stop); }
-
+    @Override public Tag serialTag() { return Tag.StopCU; }
+    @Override public void packed( BAOS baos, HashMap<String,Integer> strs, HashMap<Type,Integer> types, IdentityHashMap<Node, Integer> anodes ) { baos.packed1(nIns()); }
+    static Node make( BAOS bais ) {
+        StopCUNode stop = new StopCUNode();
+        stop.setDefX(bais.packed1()-1,null);
+        return stop;
+    }
 
     public StartCUNode start() {
         for( Node use : _outputs )
@@ -48,10 +55,9 @@ public class StopCUNode extends StopNode {
             FunNode fun = ret.fun();
             boolean noUserCtor = fun.isInstance() &&
                 !CodeGen.hasUserConstructor(((TypeMemPtr)fun.sig().arg(0))._obj);
-            // Instance <init> is an allocation helper, never an externally
-            // callable constructor when a user constructor exists.  Otherwise
-            // the same no-arg <init> is the public constructor.
-            boolean pub = fun.isPublic() && (fun.isClz() || noUserCtor);
+            // Only entry initializers seed escape discovery. Constructors
+            // and methods are discovered through escaping class/instance fields.
+            boolean pub = fun.isRoot();
             TypeFunPtr sig = fun.sig();
             // If public init, the function escapes and the related class escapes
             if( pub ) {
@@ -76,20 +82,36 @@ public class StopCUNode extends StopNode {
                 // writes through those arguments expose addresses too.
                 for( Node use : fun._outputs )
                     if( use instanceof ParmNode p && p._idx>=2 )
-                        xmem=publicBottom(xmem.escapes(addDepForwards(p)._type));
+                        xmem = publicBottom(xmem.escapes(addDepForwards(p)._type),xmem);
                 if( tret.ctl().isHigh() ) continue; // Return not reachable
                 // Capture (precisely?) all escaping pointer aliases and fidxs.
                 // Escaped fidxs means the linked world can call that function;
                 // escaped aliases means the linked world can R/W those aliases.
-                xmem = xmem.escapes(tret.ret());
-                xmem = publicBottom(xmem);
+                xmem = publicBottom(xmem.escapes(tret.ret()),xmem);
                 xmem = (TypeMem)xmem.meet(publicBottom(tret.mem(),xmem));
             }
         }
-        // Native retention is shared by the whole program, including calls
-        // on paths with no Return. A class boundary must not hide it.
+        // Native and unknown-caller retention includes calls on paths with
+        // no Return. A class boundary must not hide it.
         for( CallNode call : CodeGen.CODE._calls )
-            if( !call.isDead() ) xmem=publicBottom(xmem.escapes(call.exposed(this)));
+            if( !call.isDead() ) {
+                xmem = publicBottom(xmem.escapes(call.exposed(this)),xmem);
+                // FULL memory normalizes to public bits.  Preserve precise
+                // private arguments independently of that normalization.
+                if( call._type==Type.CONTROL && call.exposesArguments(this) )
+                    for( int i = 0; i<call.nargs(); i++ )
+                        xmem = publicBottom(xmem.escapes(addDepForwards(call.arg(i+2))._type),xmem);
+            }
+        for( FunNode fun : CodeGen.CODE._linker )
+            if( fun!=null && fun.summary()!=null && !fun.summary().isDead() ) {
+                xmem = publicBottom(xmem.escapes(fun.summary().exposed(this)),xmem);
+                // A reachable unloaded body can call these targets, including
+                // private initializers. Its arguments are unavailable here.
+                // Preserve these precise dependencies after normalizing FULL.
+                if( fun._type==Type.CONTROL )
+                    for( int fidx : fun.summary()._classDependencyFIDXs )
+                        if( fidx!=0 ) xmem = xmem.makeFrom(XInt.meet(xmem._escFs,XInt.make(fidx)),xmem._escAs);
+            }
         assert xmem._alias==1 && !xmem._one;
         return TypeTuple.make(Type.CONTROL,xmem,Type.BOTTOM);
     }
@@ -97,7 +119,6 @@ public class StopCUNode extends StopNode {
     // FULL escape sets arise from global BOTTOM.  Across a compilation-unit
     // boundary global BOTTOM exposes every public field, while retaining any
     // private escapes already discovered precisely.
-    private TypeMem publicBottom(TypeMem mem) { return publicBottom(mem,mem); }
     private TypeMem publicBottom(TypeMem mem, TypeMem prior) {
         // The pessimistic Iter pass naturally lifts transient FULL inputs to
         // precise finite sets.  Replacing FULL early there would let a later
