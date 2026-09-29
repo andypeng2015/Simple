@@ -15,14 +15,14 @@ import java.util.function.Function;
  * The Node class provides common functionality used by all subtypes.
  * Subtypes of Node specialize by overriding methods.
  */
-public abstract class Node {
+public abstract class Node implements Cloneable {
 
     /**
      * Each node has a unique dense Node ID within a compilation context
      * The ID is useful for debugging, for using as an offset in a bitvector,
      * as well as for computing equality of nodes (to be implemented later).
      */
-    public final int _nid;
+    public int _nid;
 
     /**
      * Inputs to the node. These are use-def references to Nodes.
@@ -31,7 +31,7 @@ public abstract class Node {
      * Ordering is required because e.g. "a/b" is different from "b/a".
      * The first input (offset 0) is often a {@link #isCFG} node.
      */
-    public final ArrayList<Node> _inputs;
+    public ArrayList<Node> _inputs;
 
     /**
      * Outputs reference Nodes that are not null and have this Node as an
@@ -42,7 +42,7 @@ public abstract class Node {
      * walked in either direction.  These outputs are typically used for
      * efficient optimizations but otherwise have no semantics meaning.
      */
-    public final ArrayList<Node> _outputs;
+    public ArrayList<Node> _outputs;
 
 
     /**
@@ -51,15 +51,6 @@ public abstract class Node {
      */
     public Type _type;
 
-
-    /**
-     * Immediate dominator tree depth, used to approximate a real IDOM during
-     * parsing where we do not have the whole program, and also peepholes
-     * change the CFG incrementally.
-     * <p>
-     * See {@link <a href="https://en.wikipedia.org/wiki/Dominator_(graph_theory)">...</a>}
-     */
-    char _idepth;
 
     /**
      * A private Global Static mutable counter, for unique node id generation.
@@ -83,7 +74,9 @@ public abstract class Node {
     public abstract String label();
 
     // Unique label for debugging, e.g. "Add12" or "Region30" or "EQ99"
-    public String uniqueName() { return label() + _nid; }
+    public String uniqueName() {
+        return label() + _nid;
+    }
 
     // ------------------------------------------------------------------------
 
@@ -116,31 +109,6 @@ public abstract class Node {
     // Every Node implements this; a partial-line recursive print
     abstract StringBuilder _print1(StringBuilder sb, BitSet visited);
 
-
-    // Print a node on 1 line, columnar aligned, as:
-    // NNID NNAME DDEF DDEF  [[  UUSE UUSE  ]]  TYPE
-    // 1234 sssss 1234 1234 1234 1234 1234 1234 tttttt
-    public void _printLine(StringBuilder sb ) {
-        sb.append("%4d %-7.7s ".formatted(_nid,label()));
-        if( isDead() ) {
-            sb.append("DEAD\n");
-            return;
-        }
-        for( Node def : _inputs )
-            sb.append(def==null ? "____ " : "%4d ".formatted(def._nid));
-        for( int i = _inputs.size(); i<3; i++ )
-            sb.append("     ");
-        sb.append(" [[  ");
-        for( Node use : _outputs )
-            sb.append(use==null ? "____ " : "%4d ".formatted(use._nid));
-        int lim = 5 - Math.max(_inputs.size(),3);
-        for( int i = _outputs.size(); i<lim; i++ )
-            sb.append("     ");
-        sb.append(" ]]  ");
-        if( _type!= null ) _type.print(sb);
-        sb.append("\n");
-    }
-
     public String p(int depth) { return IRPrinter.prettyPrint(this,depth); }
 
     public boolean isMultiHead() { return false; }
@@ -164,6 +132,8 @@ public abstract class Node {
     public boolean isUnused() { return nOuts() == 0; }
 
     public boolean isCFG() { return false; }
+
+    public boolean isMem() { return false; }
 
     /**
      * Change a <em>def</em> into a Node.  Keeps the edges correct, by removing
@@ -195,6 +165,7 @@ public abstract class Node {
             old_def.kill();     // Kill old def
         // Set the new_def over the old (killed) edge
         _inputs.set(idx,new_def);
+        moveDepsToWorklist();
         // Return self for easy flow-coding
         return new_def;
     }
@@ -239,6 +210,7 @@ public abstract class Node {
     // Error is 'use' does not exist; ok for 'use' to be null.
     protected boolean delUse( Node use ) {
         Utils.del(_outputs, Utils.find(_outputs, use));
+        moveDepsToWorklist(); // User-count and anti-dependence queries can now change.
         return _outputs.isEmpty();
     }
 
@@ -282,6 +254,8 @@ public abstract class Node {
     public <N extends Node> N keep() { addUse(null); return (N)this; }
     // Remove bogus null.
     public <N extends Node> N unkeep() { delUse(null); return (N)this; }
+    // Test "keep" status
+    public boolean iskeep() { return Utils.find(_outputs,null) != -1; }
 
 
     // Replace self with nnn in the graph, making 'this' go dead
@@ -292,6 +266,7 @@ public abstract class Node {
             n.unlock();
             int idx = Utils.find(n._inputs, this);
             n._inputs.set(idx,nnn);
+            n.moveDepsToWorklist(); // Rewiring can change a dependent query without changing type.
             nnn.addUse(n);
         }
         kill();
@@ -337,7 +312,7 @@ public abstract class Node {
         Type old = setType(compute());
 
         // Replace constant computations from non-constants with a constant node
-        if (!(this instanceof ConstantNode) && _type.isHighOrConst() )
+        if( !(this instanceof ConstantNode) && _type.isHighOrConst() )
             return new ConstantNode(_type).peepholeOpt();
 
         // Global Value Numbering
@@ -372,7 +347,7 @@ public abstract class Node {
     private Node deadCodeElim(Node m) {
         // If self is going dead and not being returned here (Nodes returned
         // from peephole commonly have no uses (yet)), then kill self.
-        if( m != this && isUnused() ) {
+        if( m != this && isUnused() && !isDead() ) {
             // Killing self - and since self recursively kills self's inputs we
             // might end up killing 'm', which we are returning as a live Node.
             // So we add a bogus extra null output edge to stop kill().
@@ -472,11 +447,13 @@ public abstract class Node {
     public Node dep(int idx) { return _deps.get(idx); }
 
     /**
-     * Add a node to the list o dependencies. Only add it if its not
-     * an input or output of this node, that is, it is at least one step
-     * away. The node being added must benefit from this node being peepholed.
+     * Add a node to the list of dependencies.  Only add it if its not an input
+     * or output of this node, that is, it is at least one step away.  The node
+     * being added must benefit from this node being peepholed.
      */
-    Node addDep( Node dep ) {
+    Node addDep(Node dep) { return addDep(dep,false); }
+    Node addDepForwards(Node dep) { return addDep(dep,true); }
+    private Node addDep(Node dep, boolean forwards) {
         // Running peepholes during the big assert cannot have side effects
         // like adding dependencies.
         if( IterPeeps.midAssert() ) return this;
@@ -484,8 +461,8 @@ public abstract class Node {
         if( obs != null ) obs.dep(this, dep);
         if( _deps==null ) _deps = new ArrayList<>();
         if( Utils.find(_deps  ,dep) != -1 ) return this; // Already on list
-        if( Utils.find(_inputs,dep) != -1 ) return this; // No need for deps on immediate neighbors
-        if( Utils.find(_outputs,dep)!= -1 ) return this;
+        if( !forwards && Utils.find(_inputs,dep) != -1 ) return this; // No need for deps on immediate neighbors
+        if( !forwards && Utils.find(_outputs,dep)!= -1 ) return this;
         _deps.add(dep);
         return this;
     }
@@ -563,14 +540,11 @@ public abstract class Node {
     }
 
     /**
-     * Does this node contain all constants?
-     * Ignores in(0), as is usually control.
-     * In an input is not a constant, we add dep as
-     * a dependency to it, because dep can make progress
-     * if the input becomes a constant later.
-     * It is sufficient for one of the non-const
-     * inputs to have the dependency so we don't bother
-     * checking the rest.
+     * Does this node contain all constants?  Ignores in(0), as is usually
+     * control.  In an input is not a constant, we add dep as a dependency to
+     * it because dep can make progress if the input becomes a constant later.
+     * It is sufficient for one of the non-const inputs to have the dependency,
+     * so we don't bother checking the rest.
      */
     boolean allCons(Node dep) {
         for( int i=1; i<nIns(); i++ )
@@ -581,8 +555,15 @@ public abstract class Node {
         return true;
     }
 
-    // Return the immediate dominator of this Node and compute dom tree depth.
-    Node idom() { return in(0); }
+
+    /**
+     * Immediate dominator tree depth, used to approximate a real IDOM depth
+     * during parsing where we do not have the whole program, and also
+     * peepholes change the CFG incrementally.
+     * <p>
+     * See {@link <a href="https://en.wikipedia.org/wiki/Dominator_(graph_theory)">...</a>}
+     */
+    public char _idepth;         // IDOM depth approx; Zero is unset; non-zero is cached legit
 
     // Find the lowest common ancestor in the current dominator tree.
     Node domLCA(Node rhs) {
@@ -605,10 +586,30 @@ public abstract class Node {
     }
 
 
+    // Return the immediate dominator of this Node.
+    Node idom() { return in(0); }
+
     // Make a shallow copy (same class) of this Node, with given inputs and
     // empty outputs and a new Node ID.  The original inputs are ignored.
     // Does not need to be implemented in isCFG() nodes.
     Node copy(Node lhs, Node rhs) { throw Utils.TODO("Binary ops need to implement copy"); }
+
+    // Exact-class copy preserving operation attributes, with fresh identity
+    // and no edges, dependencies, or GVN membership.
+    public final Node copyEmpty() {
+        Node n;
+        try { n = (Node)clone(); }
+        catch( CloneNotSupportedException e ) { throw new AssertionError(e); }
+        n._nid = UNIQUE_ID++;
+        n._inputs = new ArrayList<>();
+        n._outputs = new ArrayList<>();
+        n._deps = null;
+        n._hash = 0;
+        return n;
+    }
+
+    // Report any post-optimize errors
+    String err() { return null; }
 
     /**
      * Used to allow repeating tests in the same JVM.  This just resets the
